@@ -1,13 +1,30 @@
-use blake3::CHUNK_LEN;
+use blake3::{BLOCK_LEN, CHUNK_LEN};
 use serde::{Deserialize, Serialize};
+
+// Reading files at runtime requires special configuration under WASM/WASI, so including this at
+// compile time is simpler.
+const TEST_VECTORS_JSON: &str = include_str!("../test_vectors.json");
 
 // A non-multiple of 4 is important, since one possible bug is to fail to emit
 // partial words.
-pub const OUTPUT_LEN: usize = 2 * blake3::BLOCK_LEN + 3;
+pub const OUTPUT_LEN: usize = 2 * BLOCK_LEN + 3;
 
 pub const TEST_CASES: &[usize] = &[
     0,
     1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    BLOCK_LEN - 1,
+    BLOCK_LEN,
+    BLOCK_LEN + 1,
+    2 * BLOCK_LEN - 1,
+    2 * BLOCK_LEN,
+    2 * BLOCK_LEN + 1,
     CHUNK_LEN - 1,
     CHUNK_LEN,
     CHUNK_LEN + 1,
@@ -25,28 +42,28 @@ pub const TEST_CASES: &[usize] = &[
     7 * CHUNK_LEN + 1,
     8 * CHUNK_LEN,
     8 * CHUNK_LEN + 1,
-    16 * CHUNK_LEN, // AVX512's bandwidth
-    31 * CHUNK_LEN, // 16 + 8 + 4 + 2 + 1
+    16 * CHUNK_LEN,  // AVX512's bandwidth
+    31 * CHUNK_LEN,  // 16 + 8 + 4 + 2 + 1
+    100 * CHUNK_LEN, // subtrees larger than MAX_SIMD_DEGREE chunks
 ];
 
+pub const TEST_KEY: &[u8; blake3::KEY_LEN] = b"whats the Elvish word for friend";
 pub const TEST_CONTEXT: &str = "BLAKE3 2019-12-27 16:29:52 test vectors context";
 
 const COMMENT: &str = r#"
 Each test is an input length and three outputs, one for each of the hash,
 keyed_hash, and derive_key modes. The input in each case is filled with a
-251-byte-long repeating pattern: 0, 1, 2, ..., 249, 250, 0, 1, ... The key used
-with keyed_hash is the 32-byte ASCII string given in the 'key' field below. For
-derive_key, the test input is used as the input key, and the context string is
-'BLAKE3 2019-12-27 16:29:52 test vectors context'. (As good practice for
-following the security requirements of derive_key, test runners should make
-that context string a hardcoded constant, and we do not provided it in
-machine-readable form.) Outputs are encoded as hexadecimal. Each case is an
-extended output, and implementations should also check that the first 32 bytes
-match their default-length output.
+repeating sequence of 251 bytes: 0, 1, 2, ..., 249, 250, 0, 1, ..., and so on.
+The key used with keyed_hash is the 32-byte ASCII string "whats the Elvish word
+for friend", also given in the `key` field below. The context string used with
+derive_key is the ASCII string "BLAKE3 2019-12-27 16:29:52 test vectors
+context", also given in the `context_string` field below. Outputs are encoded
+as hexadecimal. Each case is an extended output, and implementations should
+also check that the first 32 bytes match their default-length output.
 "#;
 
 // Paint the input with a repeating byte pattern. We use a cycle length of 251,
-// because that's the largets prime number less than 256. This makes it
+// because that's the largest prime number less than 256. This makes it
 // unlikely to swapping any two adjacent input blocks or chunks will give the
 // same answer.
 pub fn paint_test_input(buf: &mut [u8]) {
@@ -59,6 +76,7 @@ pub fn paint_test_input(buf: &mut [u8]) {
 pub struct Cases {
     pub _comment: String,
     pub key: String,
+    pub context_string: String,
     pub cases: Vec<Case>,
 }
 
@@ -71,8 +89,6 @@ pub struct Case {
 }
 
 pub fn generate_json() -> String {
-    const TEST_KEY: &[u8; blake3::KEY_LEN] = b"whats the Elvish word for friend";
-
     let mut cases = Vec::new();
     for &input_len in TEST_CASES {
         let mut input = vec![0; input_len];
@@ -107,6 +123,7 @@ pub fn generate_json() -> String {
     let mut json = serde_json::to_string_pretty(&Cases {
         _comment: COMMENT.trim().replace("\n", " "),
         key: std::str::from_utf8(TEST_KEY).unwrap().to_string(),
+        context_string: TEST_CONTEXT.to_string(),
         cases,
     })
     .unwrap();
@@ -116,20 +133,13 @@ pub fn generate_json() -> String {
     json
 }
 
-pub fn read_test_vectors_file() -> String {
-    let test_vectors_file_path = "./test_vectors.json";
-    std::fs::read_to_string(test_vectors_file_path).expect("failed to read test_vectors.json")
-}
-
 pub fn parse_test_cases() -> Cases {
-    let json = read_test_vectors_file();
-    serde_json::from_str(&json).expect("failed to parse test_vectors.json")
+    serde_json::from_str(TEST_VECTORS_JSON).expect("failed to parse test_vectors.json")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::convert::TryInto;
 
     fn test_reference_impl_all_at_once(
         key: &[u8; blake3::KEY_LEN],
@@ -227,8 +237,9 @@ mod tests {
     ) {
         let mut out = vec![0; expected_hash.len()];
         let mut hasher = blake3::Hasher::new();
-        for &b in input {
-            hasher.update(&[b]);
+        for i in 0..input.len() {
+            hasher.update(&[input[i]]);
+            assert_eq!(i as u64 + 1, hasher.count());
         }
         hasher.finalize_xof().fill(&mut out);
         assert_eq!(expected_hash, &out[..]);
@@ -236,8 +247,9 @@ mod tests {
 
         let mut out = vec![0; expected_keyed_hash.len()];
         let mut hasher = blake3::Hasher::new_keyed(key);
-        for &b in input {
-            hasher.update(&[b]);
+        for i in 0..input.len() {
+            hasher.update(&[input[i]]);
+            assert_eq!(i as u64 + 1, hasher.count());
         }
         hasher.finalize_xof().fill(&mut out);
         assert_eq!(expected_keyed_hash, &out[..]);
@@ -245,8 +257,9 @@ mod tests {
 
         let mut out = vec![0; expected_derive_key.len()];
         let mut hasher = blake3::Hasher::new_derive_key(TEST_CONTEXT);
-        for &b in input {
-            hasher.update(&[b]);
+        for i in 0..input.len() {
+            hasher.update(&[input[i]]);
+            assert_eq!(i as u64 + 1, hasher.count());
         }
         hasher.finalize_xof().fill(&mut out);
         assert_eq!(expected_derive_key, &out[..]);
@@ -263,11 +276,12 @@ mod tests {
         assert_eq!(&expected_hash[..32], blake3::hash(input).as_bytes());
         assert_eq!(
             &expected_keyed_hash[..32],
-            &blake3::keyed_hash(key, input).as_bytes()[..],
+            blake3::keyed_hash(key, input).as_bytes(),
         );
-        let mut derive_key_out = vec![0; expected_derive_key.len()];
-        blake3::derive_key(TEST_CONTEXT, input, &mut derive_key_out);
-        assert_eq!(expected_derive_key, &derive_key_out[..],);
+        assert_eq!(
+            expected_derive_key[..32],
+            blake3::derive_key(TEST_CONTEXT, input)
+        );
     }
 
     #[test]
@@ -328,9 +342,11 @@ mod tests {
     fn test_checked_in_vectors_up_to_date() {
         // Replace Windows newlines, in case Git is configured to alter
         // newlines when files are checked out.
-        let json = read_test_vectors_file().replace("\r\n", "\n");
+        let json = TEST_VECTORS_JSON.replace("\r\n", "\n");
         if generate_json() != json {
-            panic!("Checked-in test_vectors.json is not up to date. Regenerate with `cargo run --bin generate > ./test_vectors.json`.");
+            panic!(
+                "Checked-in test_vectors.json is not up to date. Regenerate with `cargo run --bin generate > ./test_vectors.json`."
+            );
         }
     }
 }

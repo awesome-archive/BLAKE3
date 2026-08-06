@@ -1,5 +1,23 @@
+//! This is the reference implementation of BLAKE3. It is used for testing and
+//! as a readable example of the algorithms involved. Section 5.1 of [the BLAKE3
+//! spec](https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf)
+//! discusses this implementation. You can render docs for this implementation
+//! by running `cargo doc --open` in this directory.
+//!
+//! # Example
+//!
+//! ```
+//! let mut hasher = reference_impl::Hasher::new();
+//! hasher.update(b"abc");
+//! hasher.update(b"def");
+//! let mut hash = [0; 32];
+//! hasher.finalize(&mut hash);
+//! let mut extended_hash = [0; 500];
+//! hasher.finalize(&mut extended_hash);
+//! assert_eq!(hash, extended_hash[..32]);
+//! ```
+
 use core::cmp::min;
-use core::convert::TryInto;
 
 const OUT_LEN: usize = 32;
 const KEY_LEN: usize = 32;
@@ -60,23 +78,14 @@ fn compress(
     block_len: u32,
     flags: u32,
 ) -> [u32; 16] {
+    let counter_low = counter as u32;
+    let counter_high = (counter >> 32) as u32;
+    #[rustfmt::skip]
     let mut state = [
-        chaining_value[0],
-        chaining_value[1],
-        chaining_value[2],
-        chaining_value[3],
-        chaining_value[4],
-        chaining_value[5],
-        chaining_value[6],
-        chaining_value[7],
-        IV[0],
-        IV[1],
-        IV[2],
-        IV[3],
-        counter as u32,
-        (counter >> 32) as u32,
-        block_len,
-        flags,
+        chaining_value[0], chaining_value[1], chaining_value[2], chaining_value[3],
+        chaining_value[4], chaining_value[5], chaining_value[6], chaining_value[7],
+        IV[0],             IV[1],             IV[2],             IV[3],
+        counter_low,       counter_high,      block_len,         flags,
     ];
     let mut block = *block_words;
 
@@ -106,8 +115,9 @@ fn first_8_words(compression_output: [u32; 16]) -> [u32; 8] {
 }
 
 fn words_from_little_endian_bytes(bytes: &[u8], words: &mut [u32]) {
-    for (bytes_block, word) in bytes.chunks_exact(4).zip(words.iter_mut()) {
-        *word = u32::from_le_bytes(bytes_block.try_into().unwrap());
+    debug_assert_eq!(bytes.len(), 4 * words.len());
+    for (four_bytes, word) in bytes.chunks_exact(4).zip(words) {
+        *word = u32::from_le_bytes(four_bytes.try_into().unwrap());
     }
 }
 
@@ -162,9 +172,9 @@ struct ChunkState {
 }
 
 impl ChunkState {
-    fn new(key: [u32; 8], chunk_counter: u64, flags: u32) -> Self {
+    fn new(key_words: [u32; 8], chunk_counter: u64, flags: u32) -> Self {
         Self {
-            chaining_value: key,
+            chaining_value: key_words,
             chunk_counter,
             block: [0; BLOCK_LEN],
             block_len: 0,
@@ -219,8 +229,8 @@ impl ChunkState {
         Output {
             input_chaining_value: self.chaining_value,
             block_words,
-            block_len: self.block_len as u32,
             counter: self.chunk_counter,
+            block_len: self.block_len as u32,
             flags: self.flags | self.start_flag() | CHUNK_END,
         }
     }
@@ -229,14 +239,14 @@ impl ChunkState {
 fn parent_output(
     left_child_cv: [u32; 8],
     right_child_cv: [u32; 8],
-    key: [u32; 8],
+    key_words: [u32; 8],
     flags: u32,
 ) -> Output {
     let mut block_words = [0; 16];
     block_words[..8].copy_from_slice(&left_child_cv);
     block_words[8..].copy_from_slice(&right_child_cv);
     Output {
-        input_chaining_value: key,
+        input_chaining_value: key_words,
         block_words,
         counter: 0,                  // Always 0 for parent nodes.
         block_len: BLOCK_LEN as u32, // Always BLOCK_LEN (64) for parent nodes.
@@ -247,26 +257,26 @@ fn parent_output(
 fn parent_cv(
     left_child_cv: [u32; 8],
     right_child_cv: [u32; 8],
-    key: [u32; 8],
+    key_words: [u32; 8],
     flags: u32,
 ) -> [u32; 8] {
-    parent_output(left_child_cv, right_child_cv, key, flags).chaining_value()
+    parent_output(left_child_cv, right_child_cv, key_words, flags).chaining_value()
 }
 
 /// An incremental hasher that can accept any number of writes.
 pub struct Hasher {
     chunk_state: ChunkState,
-    key: [u32; 8],
+    key_words: [u32; 8],
     cv_stack: [[u32; 8]; 54], // Space for 54 subtree chaining values:
     cv_stack_len: u8,         // 2^54 * CHUNK_LEN = 2^64
     flags: u32,
 }
 
 impl Hasher {
-    fn new_internal(key: [u32; 8], flags: u32) -> Self {
+    fn new_internal(key_words: [u32; 8], flags: u32) -> Self {
         Self {
-            chunk_state: ChunkState::new(key, 0, flags),
-            key,
+            chunk_state: ChunkState::new(key_words, 0, flags),
+            key_words,
             cv_stack: [[0; 8]; 54],
             cv_stack_len: 0,
             flags,
@@ -288,7 +298,7 @@ impl Hasher {
     /// Construct a new `Hasher` for the key derivation function. The context
     /// string should be hardcoded, globally unique, and application-specific.
     pub fn new_derive_key(context: &str) -> Self {
-        let mut context_hasher = Hasher::new_internal(IV, DERIVE_KEY_CONTEXT);
+        let mut context_hasher = Self::new_internal(IV, DERIVE_KEY_CONTEXT);
         context_hasher.update(context.as_bytes());
         let mut context_key = [0; KEY_LEN];
         context_hasher.finalize(&mut context_key);
@@ -307,6 +317,7 @@ impl Hasher {
         self.cv_stack[self.cv_stack_len as usize]
     }
 
+    // Section 5.1.2 of the BLAKE3 spec explains this algorithm in more detail.
     fn add_chunk_chaining_value(&mut self, mut new_cv: [u32; 8], mut total_chunks: u64) {
         // This chunk might complete some subtrees. For each completed subtree,
         // its left child will be the current top entry in the CV stack, and
@@ -316,7 +327,7 @@ impl Hasher {
         // `new_cv` onto the stack. The number of completed subtrees is given
         // by the number of trailing 0-bits in the new total number of chunks.
         while total_chunks & 1 == 0 {
-            new_cv = parent_cv(self.pop_stack(), new_cv, self.key, self.flags);
+            new_cv = parent_cv(self.pop_stack(), new_cv, self.key_words, self.flags);
             total_chunks >>= 1;
         }
         self.push_stack(new_cv);
@@ -331,7 +342,7 @@ impl Hasher {
                 let chunk_cv = self.chunk_state.output().chaining_value();
                 let total_chunks = self.chunk_state.chunk_counter + 1;
                 self.add_chunk_chaining_value(chunk_cv, total_chunks);
-                self.chunk_state = ChunkState::new(self.key, total_chunks, self.flags);
+                self.chunk_state = ChunkState::new(self.key_words, total_chunks, self.flags);
             }
 
             // Compress input bytes into the current chunk state.
@@ -354,7 +365,7 @@ impl Hasher {
             output = parent_output(
                 self.cv_stack[parent_nodes_remaining],
                 output.chaining_value(),
-                self.key,
+                self.key_words,
                 self.flags,
             );
         }

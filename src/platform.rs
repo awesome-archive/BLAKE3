@@ -1,24 +1,18 @@
-use crate::{portable, CVWords, IncrementCounter, BLOCK_LEN};
+use crate::{BLOCK_LEN, CVWords, IncrementCounter, portable};
 use arrayref::{array_mut_ref, array_ref};
-
-#[cfg(feature = "c_avx512")]
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use crate::c_avx512;
-#[cfg(feature = "c_neon")]
-use crate::c_neon;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use crate::{avx2, sse41};
 
 cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
         cfg_if::cfg_if! {
-            if #[cfg(feature = "c_avx512")] {
+            if #[cfg(blake3_avx512_ffi)] {
                 pub const MAX_SIMD_DEGREE: usize = 16;
             } else {
                 pub const MAX_SIMD_DEGREE: usize = 8;
             }
         }
-    } else if #[cfg(feature = "c_neon")] {
+    } else if #[cfg(blake3_neon)] {
+        pub const MAX_SIMD_DEGREE: usize = 4;
+    } else if #[cfg(blake3_wasm32_simd)] {
         pub const MAX_SIMD_DEGREE: usize = 4;
     } else {
         pub const MAX_SIMD_DEGREE: usize = 1;
@@ -32,13 +26,15 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
         cfg_if::cfg_if! {
-            if #[cfg(feature = "c_avx512")] {
+            if #[cfg(blake3_avx512_ffi)] {
                 pub const MAX_SIMD_DEGREE_OR_2: usize = 16;
             } else {
                 pub const MAX_SIMD_DEGREE_OR_2: usize = 8;
             }
         }
-    } else if #[cfg(feature = "c_neon")] {
+    } else if #[cfg(blake3_neon)] {
+        pub const MAX_SIMD_DEGREE_OR_2: usize = 4;
+    } else if #[cfg(blake3_wasm32_simd)] {
         pub const MAX_SIMD_DEGREE_OR_2: usize = 4;
     } else {
         pub const MAX_SIMD_DEGREE_OR_2: usize = 2;
@@ -49,22 +45,32 @@ cfg_if::cfg_if! {
 pub enum Platform {
     Portable,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    SSE2,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     SSE41,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     AVX2,
-    #[cfg(feature = "c_avx512")]
+    #[cfg(blake3_avx512_ffi)]
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     AVX512,
-    #[cfg(feature = "c_neon")]
+    #[cfg(blake3_neon)]
     NEON,
+    #[cfg(blake3_wasm32_simd)]
+    #[allow(non_camel_case_types)]
+    WASM32_SIMD,
 }
 
 impl Platform {
     #[allow(unreachable_code)]
     pub fn detect() -> Self {
+        #[cfg(miri)]
+        {
+            return Platform::Portable;
+        }
+
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
-            #[cfg(feature = "c_avx512")]
+            #[cfg(blake3_avx512_ffi)]
             {
                 if avx512_detected() {
                     return Platform::AVX512;
@@ -76,12 +82,19 @@ impl Platform {
             if sse41_detected() {
                 return Platform::SSE41;
             }
+            if sse2_detected() {
+                return Platform::SSE2;
+            }
         }
-        // We don't use dynamic feature detection for NEON. If the "c_neon"
+        // We don't use dynamic feature detection for NEON. If the "neon"
         // feature is on, NEON is assumed to be supported.
-        #[cfg(feature = "c_neon")]
+        #[cfg(blake3_neon)]
         {
             return Platform::NEON;
+        }
+        #[cfg(blake3_wasm32_simd)]
+        {
+            return Platform::WASM32_SIMD;
         }
         Platform::Portable
     }
@@ -90,20 +103,24 @@ impl Platform {
         let degree = match self {
             Platform::Portable => 1,
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Platform::SSE2 => 4,
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Platform::SSE41 => 4,
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Platform::AVX2 => 8,
-            #[cfg(feature = "c_avx512")]
+            #[cfg(blake3_avx512_ffi)]
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Platform::AVX512 => 16,
-            #[cfg(feature = "c_neon")]
+            #[cfg(blake3_neon)]
             Platform::NEON => 4,
+            #[cfg(blake3_wasm32_simd)]
+            Platform::WASM32_SIMD => 4,
         };
         debug_assert!(degree <= MAX_SIMD_DEGREE);
         degree
     }
 
-    pub(crate) fn compress_in_place(
+    pub fn compress_in_place(
         &self,
         cv: &mut CVWords,
         block: &[u8; BLOCK_LEN],
@@ -115,22 +132,31 @@ impl Platform {
             Platform::Portable => portable::compress_in_place(cv, block, block_len, counter, flags),
             // Safe because detect() checked for platform support.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::SSE41 | Platform::AVX2 => unsafe {
-                sse41::compress_in_place(cv, block, block_len, counter, flags)
+            Platform::SSE2 => unsafe {
+                crate::sse2::compress_in_place(cv, block, block_len, counter, flags)
             },
             // Safe because detect() checked for platform support.
-            #[cfg(feature = "c_avx512")]
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Platform::SSE41 | Platform::AVX2 => unsafe {
+                crate::sse41::compress_in_place(cv, block, block_len, counter, flags)
+            },
+            // Safe because detect() checked for platform support.
+            #[cfg(blake3_avx512_ffi)]
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Platform::AVX512 => unsafe {
-                c_avx512::compress_in_place(cv, block, block_len, counter, flags)
+                crate::avx512::compress_in_place(cv, block, block_len, counter, flags)
             },
             // No NEON compress_in_place() implementation yet.
-            #[cfg(feature = "c_neon")]
+            #[cfg(blake3_neon)]
             Platform::NEON => portable::compress_in_place(cv, block, block_len, counter, flags),
+            #[cfg(blake3_wasm32_simd)]
+            Platform::WASM32_SIMD => {
+                crate::wasm32_simd::compress_in_place(cv, block, block_len, counter, flags)
+            }
         }
     }
 
-    pub(crate) fn compress_xof(
+    pub fn compress_xof(
         &self,
         cv: &CVWords,
         block: &[u8; BLOCK_LEN],
@@ -142,18 +168,27 @@ impl Platform {
             Platform::Portable => portable::compress_xof(cv, block, block_len, counter, flags),
             // Safe because detect() checked for platform support.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::SSE41 | Platform::AVX2 => unsafe {
-                sse41::compress_xof(cv, block, block_len, counter, flags)
+            Platform::SSE2 => unsafe {
+                crate::sse2::compress_xof(cv, block, block_len, counter, flags)
             },
             // Safe because detect() checked for platform support.
-            #[cfg(feature = "c_avx512")]
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Platform::SSE41 | Platform::AVX2 => unsafe {
+                crate::sse41::compress_xof(cv, block, block_len, counter, flags)
+            },
+            // Safe because detect() checked for platform support.
+            #[cfg(blake3_avx512_ffi)]
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Platform::AVX512 => unsafe {
-                c_avx512::compress_xof(cv, block, block_len, counter, flags)
+                crate::avx512::compress_xof(cv, block, block_len, counter, flags)
             },
             // No NEON compress_xof() implementation yet.
-            #[cfg(feature = "c_neon")]
+            #[cfg(blake3_neon)]
             Platform::NEON => portable::compress_xof(cv, block, block_len, counter, flags),
+            #[cfg(blake3_wasm32_simd)]
+            Platform::WASM32_SIMD => {
+                crate::wasm32_simd::compress_xof(cv, block, block_len, counter, flags)
+            }
         }
     }
 
@@ -167,9 +202,9 @@ impl Platform {
     // after every block, there's a small but measurable performance loss.
     // Compressing chunks with a dedicated loop avoids this.
 
-    pub(crate) fn hash_many<A: arrayvec::Array<Item = u8>>(
+    pub fn hash_many<const N: usize>(
         &self,
-        inputs: &[&A],
+        inputs: &[&[u8; N]],
         key: &CVWords,
         counter: u64,
         increment_counter: IncrementCounter,
@@ -191,8 +226,22 @@ impl Platform {
             ),
             // Safe because detect() checked for platform support.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Platform::SSE2 => unsafe {
+                crate::sse2::hash_many(
+                    inputs,
+                    key,
+                    counter,
+                    increment_counter,
+                    flags,
+                    flags_start,
+                    flags_end,
+                    out,
+                )
+            },
+            // Safe because detect() checked for platform support.
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Platform::SSE41 => unsafe {
-                sse41::hash_many(
+                crate::sse41::hash_many(
                     inputs,
                     key,
                     counter,
@@ -206,7 +255,7 @@ impl Platform {
             // Safe because detect() checked for platform support.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Platform::AVX2 => unsafe {
-                avx2::hash_many(
+                crate::avx2::hash_many(
                     inputs,
                     key,
                     counter,
@@ -218,10 +267,10 @@ impl Platform {
                 )
             },
             // Safe because detect() checked for platform support.
-            #[cfg(feature = "c_avx512")]
+            #[cfg(blake3_avx512_ffi)]
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Platform::AVX512 => unsafe {
-                c_avx512::hash_many(
+                crate::avx512::hash_many(
                     inputs,
                     key,
                     counter,
@@ -232,10 +281,24 @@ impl Platform {
                     out,
                 )
             },
-            // Assumed to be safe if the "c_neon" feature is on.
-            #[cfg(feature = "c_neon")]
+            // Assumed to be safe if the "neon" feature is on.
+            #[cfg(blake3_neon)]
             Platform::NEON => unsafe {
-                c_neon::hash_many(
+                crate::neon::hash_many(
+                    inputs,
+                    key,
+                    counter,
+                    increment_counter,
+                    flags,
+                    flags_start,
+                    flags_end,
+                    out,
+                )
+            },
+            // Assumed to be safe if the "wasm32_simd" feature is on.
+            #[cfg(blake3_wasm32_simd)]
+            Platform::WASM32_SIMD => unsafe {
+                crate::wasm32_simd::hash_many(
                     inputs,
                     key,
                     counter,
@@ -247,63 +310,164 @@ impl Platform {
                 )
             },
         }
+    }
+
+    pub fn xof_many(
+        &self,
+        cv: &CVWords,
+        block: &[u8; BLOCK_LEN],
+        block_len: u8,
+        mut counter: u64,
+        flags: u8,
+        out: &mut [u8],
+    ) {
+        debug_assert_eq!(0, out.len() % BLOCK_LEN, "whole blocks only");
+        if out.is_empty() {
+            // The current assembly implementation always outputs at least 1 block.
+            return;
+        }
+        match self {
+            // Safe because detect() checked for platform support.
+            #[cfg(blake3_avx512_ffi)]
+            #[cfg(unix)]
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Platform::AVX512 => unsafe {
+                crate::avx512::xof_many(cv, block, block_len, counter, flags, out)
+            },
+            _ => {
+                // For platforms without an optimized xof_many, fall back to a loop over
+                // compress_xof. This is still faster than portable code.
+                for out_block in out.chunks_exact_mut(BLOCK_LEN) {
+                    // TODO: Use array_chunks_mut here once that's stable.
+                    let out_array: &mut [u8; BLOCK_LEN] = out_block.try_into().unwrap();
+                    *out_array = self.compress_xof(cv, block, block_len, counter, flags);
+                    counter += 1;
+                }
+            }
+        }
+    }
+
+    // Explicit platform constructors, for benchmarks.
+
+    pub fn portable() -> Self {
+        Self::Portable
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub fn sse2() -> Option<Self> {
+        if sse2_detected() {
+            Some(Self::SSE2)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub fn sse41() -> Option<Self> {
+        if sse41_detected() {
+            Some(Self::SSE41)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub fn avx2() -> Option<Self> {
+        if avx2_detected() {
+            Some(Self::AVX2)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(blake3_avx512_ffi)]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub fn avx512() -> Option<Self> {
+        if avx512_detected() {
+            Some(Self::AVX512)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(blake3_neon)]
+    pub fn neon() -> Option<Self> {
+        // Assumed to be safe if the "neon" feature is on.
+        Some(Self::NEON)
+    }
+
+    #[cfg(blake3_wasm32_simd)]
+    pub fn wasm32_simd() -> Option<Self> {
+        // Assumed to be safe if the "wasm32_simd" feature is on.
+        Some(Self::WASM32_SIMD)
     }
 }
 
 // Note that AVX-512 is divided into multiple featuresets, and we use two of
 // them, F and VL.
+#[cfg(blake3_avx512_ffi)]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn avx512_detected() -> bool {
-    // Static check, e.g. for building with target-cpu=native.
-    #[cfg(all(target_feature = "avx512f", target_feature = "avx512vl"))]
-    {
-        return true;
+    if cfg!(miri) {
+        return false;
     }
-    // Dyanmic check, if std is enabled.
-    #[cfg(feature = "std")]
-    {
-        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl") {
-            return true;
-        }
+
+    // A testing-only short-circuit.
+    if cfg!(feature = "no_avx512") {
+        return false;
     }
-    false
+
+    cpufeatures::new!(has_avx512, "avx512f", "avx512vl");
+    has_avx512::get()
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn avx2_detected() -> bool {
-    // Static check, e.g. for building with target-cpu=native.
-    #[cfg(target_feature = "avx2")]
-    {
-        return true;
+    if cfg!(miri) {
+        return false;
     }
-    // Dyanmic check, if std is enabled.
-    #[cfg(feature = "std")]
-    {
-        if is_x86_feature_detected!("avx2") {
-            return true;
-        }
+
+    // A testing-only short-circuit.
+    if cfg!(feature = "no_avx2") {
+        return false;
     }
-    false
+
+    cpufeatures::new!(has_avx2, "avx2");
+    has_avx2::get()
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn sse41_detected() -> bool {
-    // Static check, e.g. for building with target-cpu=native.
-    #[cfg(target_feature = "sse4.1")]
-    {
-        return true;
+    if cfg!(miri) {
+        return false;
     }
-    // Dyanmic check, if std is enabled.
-    #[cfg(feature = "std")]
-    {
-        if is_x86_feature_detected!("sse4.1") {
-            return true;
-        }
+
+    // A testing-only short-circuit.
+    if cfg!(feature = "no_sse41") {
+        return false;
     }
-    false
+
+    cpufeatures::new!(has_sse41, "sse4.1");
+    has_sse41::get()
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[inline(always)]
+pub fn sse2_detected() -> bool {
+    if cfg!(miri) {
+        return false;
+    }
+
+    // A testing-only short-circuit.
+    if cfg!(feature = "no_sse2") {
+        return false;
+    }
+
+    cpufeatures::new!(has_sse2, "sse2");
+    has_sse2::get()
 }
 
 #[inline(always)]

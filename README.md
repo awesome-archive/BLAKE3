@@ -1,4 +1,4 @@
-# <a href="#"><img src="media/BLAKE3.svg" alt="BLAKE3" height=50></a>
+# BLAKE3
 
 BLAKE3 is a cryptographic hash function that is:
 
@@ -13,51 +13,69 @@ BLAKE3 is a cryptographic hash function that is:
 - **One algorithm with no variants**, which is fast on x86-64 and also
   on smaller architectures.
 
-The chart below shows BLAKE3's performance on modern server hardware, an
-Intel Cascade Lake-SP 8275CL processor:
+The [chart below](https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/benchmarks/bar_chart.py)
+is an example benchmark of 16 KiB inputs on a Cascade Lake-SP 8275CL server CPU
+from 2019. For more detailed benchmarks, see the
+[BLAKE3 paper](https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf).
 
 <p align="center">
 <img src="media/speed.svg" alt="performance graph">
 </p>
 
 BLAKE3 is based on an optimized instance of the established hash
-function [BLAKE2](https://blake2.net), and on the [original Bao tree
+function [BLAKE2](https://blake2.net) and on the [original Bao tree
 mode](https://github.com/oconnor663/bao/blob/master/docs/spec_0.9.1.md).
-The BLAKE3 specifications and design rationale are available in the
-[BLAKE3
+The specifications and design rationale are available in the [BLAKE3
 paper](https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf).
-The current version of [Bao](https://github.com/oconnor663/bao)
-implements verified streaming with BLAKE3.
+The default output size is 256 bits. The current version of
+[Bao](https://github.com/oconnor663/bao) implements verified streaming
+with BLAKE3.
 
-This repository provides the official Rust implementation of BLAKE3,
-with
+This repository is the official implementation of BLAKE3. It includes:
 
 * The [`blake3`](https://crates.io/crates/blake3) Rust crate, which
-  includes optimized SIMD implementations, using dynamic CPU feature
-  detection on x86. SSE4.1 and AVX2 support are implemented in Rust,
-  while AVX-512 and ARM NEON support are implemented in C and controlled
-  by the `c_avx512` and `c_neon` features. Multi-threading is
-  implemented with [Rayon](https://github.com/rayon-rs/rayon) and
-  controlled by the `rayon` feature. 
+  includes optimized implementations for SSE2, SSE4.1, AVX2, AVX-512,
+  NEON, and WASM, with automatic runtime CPU feature detection on x86.
+  The `rayon` feature provides multithreading.
 
-* A simplified [reference
-  implementation](reference_impl/reference_impl.rs), which is portable
-  and `no_std`-compatible.
+* The [`b3sum`](https://crates.io/crates/b3sum) Rust crate, which
+  provides a command line interface. It uses multithreading by default,
+  making it an order of magnitude faster than e.g. `sha256sum` on
+  typical desktop hardware.
 
-* The [`b3sum` sub-crate](./b3sum), which provides a command line
-  interface. You can install it with `cargo install b3sum`. It includes
-  multi-threading and AVX-512 support by default.
+* The [C implementation](c), which like the Rust implementation includes SIMD
+  optimizations (all except WASM), CPU feature detection on x86, and optional
+  multithreading. See [`c/README.md`](c/README.md).
 
+* The [Rust reference implementation](reference_impl/reference_impl.rs),
+  which is discussed in Section 5.1 of the [BLAKE3
+  paper](https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf).
+  This implementation is much smaller and simpler than the optimized
+  ones above. If you want to see how BLAKE3 works, or you're writing a
+  port that doesn't need multithreading or SIMD optimizations, start
+  here. Ports of the reference implementation to other languages are
+  hosted in separate repositories
+  ([C](https://github.com/oconnor663/blake3_reference_impl_c),
+  [Python](https://github.com/oconnor663/pure_python_blake3)).
+
+* A [set of test
+  vectors](https://github.com/BLAKE3-team/BLAKE3/blob/master/test_vectors/test_vectors.json)
+  that covers extended outputs, all three modes, and a variety of input
+  lengths.
+
+* [![Actions Status](https://github.com/BLAKE3-team/BLAKE3/workflows/tests/badge.svg)](https://github.com/BLAKE3-team/BLAKE3/actions)
 
 BLAKE3 was designed by:
 
-* [@oconnor663 ](https://github.com/oconnor663) (Jack O'Connor)
-* [@sneves](https://github.com/sneves) (Samuel Neves)
-* [@veorq](https://github.com/veorq) (Jean-Philippe Aumasson)
-* [@zookozcash](https://github.com/zookozcash) (Zooko)
+* [@oconnor663] (Jack O'Connor)
+* [@sneves] (Samuel Neves)
+* [@veorq] (Jean-Philippe Aumasson)
+* [@zookozcash] (Zooko)
 
-The development of BLAKE3 was sponsored by
-[Teserakt](https://teserakt.io) and [Electric Coin Company](https://electriccoin.co).
+The development of BLAKE3 was sponsored by [Electric Coin Company](https://electriccoin.co).
+
+BLAKE3 is also [specified](https://c2sp.org/BLAKE3) in the [Community
+Cryptography Specification Project (C2SP)](https://c2sp.org).
 
 *NOTE: BLAKE3 is not a password hashing algorithm, because it's
 designed to be fast, whereas password hashing should not be fast. If you
@@ -66,16 +84,16 @@ we recommend [Argon2](https://github.com/P-H-C/phc-winner-argon2).*
 
 ## Usage
 
-This repository provides the `b3sum` command line utility and the
-`blake3` Rust crate.
+### The `b3sum` utility
 
-### The b3sum utility
-
-The `b3sum` utility allows you to process files and data from standard
-input using BLAKE3 in any of its three modes.
-To use `b3sum` on the command line, [install Rust and
+The `b3sum` command line utility prints the BLAKE3 hashes of files or of
+standard input. Prebuilt binaries are available for Linux, Windows, and
+macOS (requiring the [unidentified developer
+workaround](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac))
+on the [releases page](https://github.com/BLAKE3-team/BLAKE3/releases).
+If you've [installed Rust and
 Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html),
-and then run:
+you can also build `b3sum` yourself with:
 
 ```bash
 cargo install b3sum
@@ -84,7 +102,7 @@ cargo install b3sum
 If `rustup` didn't configure your `PATH` for you, you might need to go
 looking for the installed binary in e.g. `~/.cargo/bin`. You can test
 out how fast BLAKE3 is on your machine by creating a big file and
-hashing it, for example as follows:
+hashing it, for example:
 
 ```bash
 # Create a 1 GB file.
@@ -95,7 +113,7 @@ time openssl sha256 /tmp/bigfile
 time b3sum /tmp/bigfile
 ```
 
-### The `blake3` crate
+### The `blake3` crate [![docs.rs](https://docs.rs/blake3/badge.svg)](https://docs.rs/blake3)
 
 To use BLAKE3 from Rust code, add a dependency on the `blake3` crate to
 your `Cargo.toml`. Here's an example of hashing some input bytes:
@@ -116,7 +134,10 @@ assert_eq!(hash1, hash2);
 let mut output = [0; 1000];
 let mut output_reader = hasher.finalize_xof();
 output_reader.fill(&mut output);
-assert_eq!(&output[..32], hash1.as_bytes());
+assert_eq!(hash1, output[..32]);
+
+// Print a hash as hex.
+println!("{}", hash1);
 ```
 
 Besides `hash`, BLAKE3 provides two other modes, `keyed_hash` and
@@ -134,9 +155,8 @@ let mac2 = hasher.finalize();
 assert_eq!(mac1, mac2);
 ```
 
-The `derive_key` mode takes a context string of any length and key
-material of any length, and it outputs a derived key of any length. The
-context string should be hardcoded, globally unique, and
+The `derive_key` mode takes a context string and some key material (not a
+password). The context string should be hardcoded, globally unique, and
 application-specific. A good default format for the context string is
 `"[application] [commit timestamp] [purpose]"`:
 
@@ -144,22 +164,65 @@ application-specific. A good default format for the context string is
 // Derive a couple of subkeys for different purposes.
 const EMAIL_CONTEXT: &str = "BLAKE3 example 2020-01-07 17:10:44 email key";
 const API_CONTEXT: &str = "BLAKE3 example 2020-01-07 17:11:21 API key";
-let input_key = b"some very secret key material (>'-')> <('-'<) ^('-')^";
-let mut email_key = [0; 32];
-blake3::derive_key(EMAIL_CONTEXT, input_key, &mut email_key);
-let mut api_key = [0; 32];
-blake3::derive_key(API_CONTEXT, input_key, &mut api_key);
-assert!(email_key != api_key);
+let input_key_material = b"usually at least 32 random bytes, not a password";
+let email_key = blake3::derive_key(EMAIL_CONTEXT, input_key_material);
+let api_key = blake3::derive_key(API_CONTEXT, input_key_material);
+assert_ne!(email_key, api_key);
 ```
+
+### The C implementation
+
+See [`c/README.md`](c/README.md).
+
+### Other implementations
+
+There are too many implementations out there for us to keep track of,
+but some highlights include [an optimized Go
+implementation](https://github.com/zeebo/blake3), [Wasm bindings for
+Node.js and browsers](https://github.com/connor4312/blake3), [binary
+wheels for Python](https://github.com/oconnor663/blake3-py), [.NET
+bindings](https://github.com/xoofx/Blake3.NET), and [a pure Java
+implementation](https://commons.apache.org/proper/commons-codec/apidocs/org/apache/commons/codec/digest/Blake3.html).
 
 ## Contributing
 
 Please see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Intellectual property
+## Licenses
 
-The Rust code is copyright Jack O'Connor, 2019-2020. 
-The C code is copyright Samuel Neves and Jack O'Connor, 2019-2020.
+This work is released into the public domain with [CC0 1.0](./LICENSE_CC0).
+Alternatively, it is licensed under any of the following:
 
-This work is released into the public domain with CC0 1.0.
-Alternatively, it is licensed under the Apache License 2.0.
+* [Apache 2.0](./LICENSE_A2)
+* [Apache 2.0 with LLVM exceptions](./LICENSE_A2LLVM)
+
+
+## Adoption & deployment
+
+* [Bazel](https://github.com/bazelbuild/bazel/releases/tag/6.4.0)
+* [Cargo](https://github.com/rust-lang/cargo/pull/14137)
+* [Ccache](https://ccache.dev/releasenotes.html#_ccache_4_0)
+* [Chia](https://github.com/Chia-Network/chia-blockchain/blob/main/CHANGELOG.md#10beta8-aka-beta-18---2020-07-16)
+* [Clickhouse](https://github.com/ClickHouse/ClickHouse/blob/master/rust/chcache/Cargo.toml#L7)
+* [Farcaster](https://www.farcaster.xyz/)
+* [IPFS](https://github.com/ipfs/go-verifcid/issues/13)
+* [Iroh](https://www.iroh.computer/blog/blake3-hazmat-api)
+* [LLVM](https://reviews.llvm.org/D121510)
+* [Nix](https://github.com/NixOS/nix/pull/12379)
+* [Nym](https://github.com/nymtech/nym/blob/59056a22c5e6b01a38da2124662bd1fa3c8abef2/common/nymsphinx/params/src/lib.rs#L5)
+* [OpenZFS](https://github.com/openzfs/zfs/)
+* [Redox](https://www.redox-os.org/news/pkgar-introduction/)
+* [Solana](https://docs.rs/solana-program/1.9.5/solana_program/blake3/index.html)
+* [Tekken 8](https://x.com/rodarmor/status/1751567502050771189)
+* [Wasmer](https://github.com/wasmerio/wasmer/blob/4f935a8c162bf604df223003e434e4f7ca253688/lib/cache/src/hash.rs#L21)
+
+
+## Miscellany
+
+- [@veorq] and [@oconnor663] did [an interview with Cryptography FM](https://cryptography.fireside.fm/3).
+- [@oconnor663] did [an interview with Saito](https://www.youtube.com/watch?v=cJkmIt7yN_E).
+
+[@oconnor663]: https://github.com/oconnor663
+[@sneves]: https://github.com/sneves
+[@veorq]: https://github.com/veorq
+[@zookozcash]: https://github.com/zookozcash

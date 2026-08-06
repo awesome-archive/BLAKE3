@@ -8,7 +8,6 @@ import subprocess
 HERE = path.dirname(__file__)
 TEST_VECTORS_PATH = path.join(HERE, "..", "test_vectors", "test_vectors.json")
 TEST_VECTORS = json.load(open(TEST_VECTORS_PATH))
-TEST_CONTEXT = "BLAKE3 2019-12-27 16:29:52 test vectors context"
 
 
 def run_blake3(args, input):
@@ -20,7 +19,7 @@ def run_blake3(args, input):
 
 
 # Fill the input with a repeating byte pattern. We use a cycle length of 251,
-# because that's the largets prime number less than 256. This makes it unlikely
+# because that's the largest prime number less than 256. This makes it unlikely
 # to swapping any two adjacent input blocks or chunks will give the same
 # answer.
 def make_test_input(length):
@@ -37,6 +36,7 @@ def main():
         input_len = case["input_len"]
         input = make_test_input(input_len)
         hex_key = hexlify(TEST_VECTORS["key"].encode())
+        context_string = TEST_VECTORS["context_string"]
         expected_hash_xof = case["hash"]
         expected_hash = expected_hash_xof[:64]
         expected_keyed_hash_xof = case["keyed_hash"]
@@ -76,7 +76,7 @@ def main():
                     input_len, expected_keyed_hash_xof, line)
 
         # Test the default derive key.
-        test_derive_key = run_blake3(["--derive-key", TEST_CONTEXT], input)
+        test_derive_key = run_blake3(["--derive-key", context_string], input)
         for line in test_derive_key.splitlines():
             assert expected_derive_key == line, \
                 "derive_key({}): {} != {}".format(
@@ -85,7 +85,7 @@ def main():
         # Test the extended derive key.
         xof_len = len(expected_derive_key_xof) // 2
         test_derive_key_xof = run_blake3(
-            ["--derive-key", TEST_CONTEXT, "--length",
+            ["--derive-key", context_string, "--length",
              str(xof_len)], input)
         for line in test_derive_key_xof.splitlines():
             assert expected_derive_key_xof == line, \

@@ -1,10 +1,8 @@
-use crate::{CVWords, IncrementCounter, BLOCK_LEN, OUT_LEN};
-
-pub const DEGREE: usize = 4;
+use crate::{BLOCK_LEN, CVWords, IncrementCounter, OUT_LEN};
 
 // Unsafe because this may only be called on platforms supporting NEON.
-pub unsafe fn hash_many<A: arrayvec::Array<Item = u8>>(
-    inputs: &[&A],
+pub unsafe fn hash_many<const N: usize>(
+    inputs: &[&[u8; N]],
     key: &CVWords,
     counter: u64,
     increment_counter: IncrementCounter,
@@ -17,25 +15,27 @@ pub unsafe fn hash_many<A: arrayvec::Array<Item = u8>>(
     // array, but the C implementations don't. Even though this is an unsafe
     // function, assert the bounds here.
     assert!(out.len() >= inputs.len() * OUT_LEN);
-    ffi::blake3_hash_many_neon(
-        inputs.as_ptr() as *const *const u8,
-        inputs.len(),
-        A::CAPACITY / BLOCK_LEN,
-        key.as_ptr(),
-        counter,
-        increment_counter.yes(),
-        flags,
-        flags_start,
-        flags_end,
-        out.as_mut_ptr(),
-    )
+    unsafe {
+        ffi::blake3_hash_many_neon(
+            inputs.as_ptr() as *const *const u8,
+            inputs.len(),
+            N / BLOCK_LEN,
+            key.as_ptr(),
+            counter,
+            increment_counter.yes(),
+            flags,
+            flags_start,
+            flags_end,
+            out.as_mut_ptr(),
+        )
+    }
 }
 
 // blake3_neon.c normally depends on blake3_portable.c, because the NEON
 // implementation only provides 4x compression, and it relies on the portable
 // implementation for 1x compression. However, we expose the portable Rust
 // implementation here instead, to avoid linking in unnecessary code.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blake3_compress_in_place_portable(
     cv: *mut u32,
     block: *const u8,
@@ -55,7 +55,7 @@ pub extern "C" fn blake3_compress_in_place_portable(
 }
 
 pub mod ffi {
-    extern "C" {
+    unsafe extern "C" {
         pub fn blake3_hash_many_neon(
             inputs: *const *const u8,
             num_inputs: usize,
@@ -77,7 +77,7 @@ mod test {
 
     #[test]
     fn test_hash_many() {
-        // This entire file is gated on feature="c_neon", so NEON support is
+        // This entire file is gated on feature="neon", so NEON support is
         // assumed here.
         crate::test::test_hash_many_fn(hash_many, hash_many);
     }
